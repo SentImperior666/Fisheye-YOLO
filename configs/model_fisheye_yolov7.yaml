@@ -1,0 +1,10 @@
+backbone: yolov7
+cfg_path: third_party/yolov7/cfg/training/yolov7.yaml
+nc: 80
+use_fisheye_stem: false
+replace_convs: true
+fisheye:
+  liftsamples: 4
+  mc_samples: 32
+  fill: 0.25
+  knn: true
