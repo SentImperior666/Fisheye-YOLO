@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  fisheye-yolo:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: fisheye-yolo:latest
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace
+      - /data:/data
+    environment:
+      - PYTHONPATH=/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]

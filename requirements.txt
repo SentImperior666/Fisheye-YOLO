@@ -1,0 +1,12 @@
+numpy
+opencv-python
+pycocotools
+pyyaml
+tqdm
+matplotlib
+pandas
+seaborn
+scipy
+tensorboard
+torchmetrics
+thop
