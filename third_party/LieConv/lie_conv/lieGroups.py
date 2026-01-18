@@ -1,3 +1,4 @@
+import math
 import torch
 import numpy as np
 from lie_conv.utils import export, Named
@@ -598,3 +599,63 @@ class FakeSchGroup(object):
         return abq_pairs
 
 
+@export
+class FisheyeSO3(LieGroup):
+    """SO(3) group wrapper that lifts fisheye pixels to rays before lifting to SO(3)."""
+    lie_dim = 3
+    rep_dim = 3
+    q_dim = 0
+
+    def __init__(self, camera, alpha=1.0):
+        super().__init__(alpha=alpha)
+        self.camera = camera
+
+    def exp(self, w):
+        theta = norm(w, dim=-1)[..., None, None]
+        K = cross_matrix(w)
+        I = torch.eye(3, device=w.device, dtype=w.dtype)
+        return I + K * sinc(theta) + (K @ K) * cosc(theta)
+
+    def log(self, R):
+        trR = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]
+        costheta = ((trR - 1) / 2).clamp(max=1, min=-1).unsqueeze(-1)
+        theta = torch.acos(costheta)
+        return uncross_matrix(R) * sinc_inv(theta)
+
+    def components2matrix(self, a):
+        return cross_matrix(a)
+
+    def matrix2components(self, A):
+        return uncross_matrix(A)
+
+    def lifted_elems(self, pt, nsamples, **kwargs):
+        if pt.shape[-1] == 2:
+            pt = self.camera.unproject(pt)
+
+        device, dtype = pt.device, pt.dtype
+        *bs, n, _ = pt.shape
+
+        d = pt / norm(pt, dim=-1, keepdim=True)
+        zhat = torch.zeros(*bs, n, nsamples, 3, device=device, dtype=dtype)
+        zhat[..., 2] = 1.0
+
+        theta = (2.0 * math.pi) * torch.rand(*bs, n, nsamples, 1, device=device, dtype=dtype)
+        Rz = self.exp(zhat * theta)
+
+        d_rep = d.unsqueeze(-2).expand(*bs, n, nsamples, 3)
+        w = torch.cross(zhat, d_rep, dim=-1)
+        sin = norm(w, dim=-1)
+        cos = (zhat * d_rep).sum(dim=-1)
+
+        angle = torch.atan2(sin, cos).unsqueeze(-1)
+        Rp = self.exp(w * sinc_inv(angle))
+
+        A = self.log(Rp @ Rz)
+        flat_a = A.reshape(*bs, n * nsamples, 3)
+        return flat_a, None
+
+    @torch.no_grad()
+    def warp_pixels(self, uv, R):
+        d = self.camera.unproject(uv)
+        d2 = (R @ d.unsqueeze(-1)).squeeze(-1)
+        return self.camera.project(d2)

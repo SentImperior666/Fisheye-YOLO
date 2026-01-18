@@ -19,7 +19,7 @@ u' = π( R · π⁻¹(u) )
 ```
 
 where `π` and `π⁻¹` are fisheye projection/unprojection. We lift pixel coordinates to rays and run SO(3)-equivariant
-LieConv kernels over these lifted coordinates.
+LieConv kernels over these lifted coordinates. The LieConv group registry includes `FisheyeSO3` for this purpose.
 
 ## Repo layout
 

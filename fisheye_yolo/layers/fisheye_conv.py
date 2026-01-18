@@ -5,12 +5,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fisheye_yolo.geometry.fisheye_camera import FisheyeCameraModel
-from fisheye_yolo.geometry.fisheye_so3 import FisheyeSO3
 from fisheye_yolo.utils.third_party import ensure_lieconv_on_path
 
 ensure_lieconv_on_path()
 
 from lie_conv.lieConv import LieConv
+from lie_conv.lieGroups import FisheyeSO3
 
 
 def _pixel_grid(h, w, device, dtype):
@@ -20,7 +20,7 @@ def _pixel_grid(h, w, device, dtype):
     return torch.stack([uu, vv], dim=-1).reshape(-1, 2)
 
 
-class FisheyeConv2d(nn.Module):
+class FisheyeLieConv2d(LieConv):
     def __init__(
         self,
         c1,
@@ -36,12 +36,9 @@ class FisheyeConv2d(nn.Module):
         super().__init__()
         if group is None:
             if camera is None:
-                raise ValueError("camera or group is required for FisheyeConv2d")
+                raise ValueError("camera or group is required for FisheyeLieConv2d")
             group = FisheyeSO3(camera)
-        self.group = group
-        self.liftsamples = liftsamples
-        self.stride = stride
-        self.lieconv = LieConv(
+        super().__init__(
             c1,
             c2,
             mc_samples=mc_samples,
@@ -53,6 +50,9 @@ class FisheyeConv2d(nn.Module):
             act="swish",
             mean=False,
         )
+        self.group = group
+        self.liftsamples = liftsamples
+        self.stride = stride
 
     def forward(self, x):
         if self.stride > 1:
@@ -62,7 +62,7 @@ class FisheyeConv2d(nn.Module):
         values = x.permute(0, 2, 3, 1).reshape(bs, -1, c)
         mask = torch.ones(bs, values.shape[1], dtype=torch.bool, device=x.device)
         abq_pairs, expanded_values, expanded_mask = self.group.lift((coords, values, mask), self.liftsamples)
-        _, out_values, _ = self.lieconv((abq_pairs, expanded_values, expanded_mask))
+        _, out_values, _ = super().forward((abq_pairs, expanded_values, expanded_mask))
         return out_values.reshape(bs, h, w, -1).permute(0, 3, 1, 2)
 
 
@@ -86,7 +86,7 @@ class FisheyeConv(nn.Module):
     ):
         super().__init__()
         del k, p, g, d
-        self.conv = FisheyeConv2d(
+        self.conv = FisheyeLieConv2d(
             c1,
             c2,
             stride=s,

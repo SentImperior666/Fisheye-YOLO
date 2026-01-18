@@ -1,3 +1,3 @@
-from fisheye_yolo.layers.fisheye_conv import FisheyeConv, FisheyeConv2d
+from fisheye_yolo.layers.fisheye_conv import FisheyeConv, FisheyeLieConv2d
 
-__all__ = ["FisheyeConv", "FisheyeConv2d"]
+__all__ = ["FisheyeConv", "FisheyeLieConv2d"]
