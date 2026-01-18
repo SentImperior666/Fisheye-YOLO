@@ -62,8 +62,14 @@ class FisheyeLieConv2d(LieConv):
         values = x.permute(0, 2, 3, 1).reshape(bs, -1, c)
         mask = torch.ones(bs, values.shape[1], dtype=torch.bool, device=x.device)
         abq_pairs, expanded_values, expanded_mask = self.group.lift((coords, values, mask), self.liftsamples)
-        _, out_values, _ = super().forward((abq_pairs, expanded_values, expanded_mask))
-        return out_values.reshape(bs, h, w, -1).permute(0, 3, 1, 2)
+        _, out_values, out_mask = super().forward((abq_pairs, expanded_values, expanded_mask))
+        out_values = out_values.reshape(bs, h * w, self.liftsamples, -1)
+        out_mask = out_mask.reshape(bs, h * w, self.liftsamples)
+        out_mask = out_mask.unsqueeze(-1)
+        summed = (out_values * out_mask).sum(dim=2)
+        denom = out_mask.sum(dim=2).clamp(min=1)
+        pooled = summed / denom
+        return pooled.reshape(bs, h, w, -1).permute(0, 3, 1, 2)
 
 
 class FisheyeConv(nn.Module):
