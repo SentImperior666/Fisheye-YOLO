@@ -39,7 +39,7 @@ def main():
     parser.add_argument("--coco-root", required=True, help="COCO root directory")
     parser.add_argument("--split", default="train2017", help="Dataset split (train2017/val2017)")
     parser.add_argument("--output-root", required=True, help="Output directory for Fisheye-COCO")
-    parser.add_argument("--out-size", type=_parse_size, default="640,640", help="Output size H,W")
+    parser.add_argument("--out-size", type=_parse_size, default=(640, 640), help="Output size H,W")
     parser.add_argument("--fov-src", type=float, default=90.0, help="Source pinhole FOV in degrees")
     parser.add_argument("--fov-fisheye", type=float, default=180.0, help="Fisheye FOV in degrees")
     parser.add_argument("--samples-per-edge", type=int, default=9, help="BBox boundary samples per edge")
