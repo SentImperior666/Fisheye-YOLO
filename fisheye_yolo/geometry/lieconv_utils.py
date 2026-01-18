@@ -46,4 +46,11 @@ def cross_matrix(w):
 
 
 def uncross_matrix(A):
-    return torch.stack([A[..., 2, 1], A[..., 0, 2], A[..., 1, 0]], dim=-1)
+    return torch.stack(
+        [
+            (A[..., 2, 1] - A[..., 1, 2]) / 2,
+            (A[..., 0, 2] - A[..., 2, 0]) / 2,
+            (A[..., 1, 0] - A[..., 0, 1]) / 2,
+        ],
+        dim=-1,
+    )
