@@ -33,7 +33,6 @@ class FisheyeLieConv2d(LieConv):
         fill=1 / 4,
         knn=True,
     ):
-        super().__init__()
         if group is None:
             if camera is None:
                 raise ValueError("camera or group is required for FisheyeLieConv2d")
