@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 
 import cv2
+from tqdm import tqdm
 
 from fisheye_yolo.data.warp import (
+    FISHEYE_MODELS,
     warp_bbox_xyxy_pinhole_to_fisheye,
     warp_pinhole_to_fisheye,
     xyxy_to_yolo,
@@ -37,7 +39,7 @@ def _bbox_xywh_to_xyxy(bbox):
 def main():
     parser = argparse.ArgumentParser(description="Create Fisheye-COCO from COCO-2017.")
     parser.add_argument("--coco-root", required=True, help="COCO root directory")
-    parser.add_argument("--split", default="train2017", help="Dataset split (train2017/val2017)")
+    parser.add_argument("--split", default="train2017", help="Dataset split (train2017/val2017/test2017)")
     parser.add_argument("--output-root", required=True, help="Output directory for Fisheye-COCO")
     parser.add_argument("--out-size", type=_parse_size, default=(640, 640), help="Output size H,W")
     parser.add_argument("--fov-src", type=float, default=90.0, help="Source pinhole FOV in degrees")
@@ -45,12 +47,33 @@ def main():
     parser.add_argument("--samples-per-edge", type=int, default=9, help="BBox boundary samples per edge")
     parser.add_argument("--max-images", type=int, default=None, help="Limit images for debugging")
     parser.add_argument("--write-yolo-labels", action="store_true", help="Also write YOLO txt labels")
+    parser.add_argument(
+        "--fisheye-model",
+        choices=FISHEYE_MODELS,
+        default="equisolid",
+        help="Fisheye projection model (default: equisolid, common in real cameras)",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Preview mode: convert only first 10 images",
+    )
     args = parser.parse_args()
+
+    # Preview mode overrides max_images
+    if args.preview:
+        args.max_images = 10
 
     coco_root = Path(args.coco_root)
     split = args.split
-    ann_path = coco_root / "annotations" / f"instances_{split}.json"
+
+    # Test split uses image_info_*.json (no annotations), train/val use instances_*.json
+    if "test" in split:
+        ann_path = coco_root / "annotations" / f"image_info_{split}.json"
+    else:
+        ann_path = coco_root / "annotations" / f"instances_{split}.json"
     data = _load_coco(ann_path)
+    has_annotations = "annotations" in data and len(data["annotations"]) > 0
 
     out_root = Path(args.output_root)
     out_images = out_root / "images" / split
@@ -58,28 +81,32 @@ def main():
     out_annotations = out_root / "annotations"
     out_images.mkdir(parents=True, exist_ok=True)
     out_annotations.mkdir(parents=True, exist_ok=True)
-    if args.write_yolo_labels:
+    if args.write_yolo_labels and has_annotations:
         out_labels.mkdir(parents=True, exist_ok=True)
 
-    categories = sorted(data["categories"], key=lambda c: c["id"])
+    categories = sorted(data.get("categories", []), key=lambda c: c["id"])
     cat_id_to_idx = {c["id"]: i for i, c in enumerate(categories)}
-    _write_json(out_root / "category_map.json", cat_id_to_idx)
+    if categories:
+        _write_json(out_root / "category_map.json", cat_id_to_idx)
 
     anns_by_image = {}
-    for ann in data["annotations"]:
-        anns_by_image.setdefault(ann["image_id"], []).append(ann)
+    if has_annotations:
+        for ann in data["annotations"]:
+            anns_by_image.setdefault(ann["image_id"], []).append(ann)
 
     new_images = []
     new_annotations = []
     new_ann_id = 1
 
     h_out, w_out = args.out_size
-    img_count = 0
-    for info in data["images"]:
-        if args.max_images is not None and img_count >= args.max_images:
-            break
-        img_count += 1
-
+    
+    # Determine how many images to process
+    images_to_process = data["images"]
+    if args.max_images is not None:
+        images_to_process = images_to_process[:args.max_images]
+    
+    # Process images with progress bar
+    for info in tqdm(images_to_process, desc="Converting images", unit="img"):
         img_path = coco_root / split / info["file_name"]
         image = cv2.imread(str(img_path))
         if image is None:
@@ -90,6 +117,7 @@ def main():
             out_size=(h_out, w_out),
             fov_fisheye_deg=args.fov_fisheye,
             fov_src_deg=args.fov_src,
+            fisheye_model=args.fisheye_model,
         )
         cv2.imwrite(str(out_images / info["file_name"]), warped)
 
@@ -112,6 +140,7 @@ def main():
                 fov_src_deg=args.fov_src,
                 fov_fisheye_deg=args.fov_fisheye,
                 samples_per_edge=args.samples_per_edge,
+                fisheye_model=args.fisheye_model,
             )
             if warped_bbox is None:
                 continue
@@ -134,16 +163,23 @@ def main():
                 xc, yc, bw, bh = xyxy_to_yolo(wx1, wy1, wx2, wy2, w_out, h_out)
                 yolo_lines.append(f"{cat_id_to_idx[ann['category_id']]} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}")
 
-        if args.write_yolo_labels:
+        if args.write_yolo_labels and has_annotations:
             label_path = out_labels / f"{Path(info['file_name']).stem}.txt"
             label_path.write_text("\n".join(yolo_lines), encoding="utf-8")
 
-    out_data = {
-        "images": new_images,
-        "annotations": new_annotations,
-        "categories": categories,
-    }
-    out_json = out_annotations / f"instances_fisheye_{split}.json"
+    if has_annotations:
+        out_data = {
+            "images": new_images,
+            "annotations": new_annotations,
+            "categories": categories,
+        }
+        out_json = out_annotations / f"instances_fisheye_{split}.json"
+    else:
+        # Test split: only image info, no annotations
+        out_data = {
+            "images": new_images,
+        }
+        out_json = out_annotations / f"image_info_fisheye_{split}.json"
     _write_json(out_json, out_data)
 
 
