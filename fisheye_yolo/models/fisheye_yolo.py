@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 import torch.nn as nn
 
@@ -22,6 +22,11 @@ class FisheyeLayerConfig:
     fill: float = 1 / 4
     knn: bool = True
     max_replace: Optional[int] = None
+    # Scalability parameters
+    mode: Literal["patch", "sparse", "full"] = "patch"
+    patch_size: int = 16
+    patch_overlap: float = 0.5
+    neighborhood_radius: int = 5
 
 
 def _replace_convs(module, conv_cls, camera: FisheyeCameraModel, cfg: FisheyeLayerConfig, count):
@@ -41,6 +46,10 @@ def _replace_convs(module, conv_cls, camera: FisheyeCameraModel, cfg: FisheyeLay
                 mc_samples=cfg.mc_samples,
                 fill=cfg.fill,
                 knn=cfg.knn,
+                mode=cfg.mode,
+                patch_size=cfg.patch_size,
+                patch_overlap=cfg.patch_overlap,
+                neighborhood_radius=cfg.neighborhood_radius,
             )
             setattr(module, name, replacement)
             count[0] += 1
@@ -96,6 +105,10 @@ class FisheyeYOLO(nn.Module):
                 mc_samples=fisheye_cfg.mc_samples,
                 fill=fisheye_cfg.fill,
                 knn=fisheye_cfg.knn,
+                mode=fisheye_cfg.mode,
+                patch_size=fisheye_cfg.patch_size,
+                patch_overlap=fisheye_cfg.patch_overlap,
+                neighborhood_radius=fisheye_cfg.neighborhood_radius,
             )
 
         if replace_convs:

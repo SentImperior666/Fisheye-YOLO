@@ -1,6 +1,42 @@
 import numpy as np
 import cv2
 
+# Supported fisheye projection models
+FISHEYE_MODELS = ("equidistant", "equisolid", "stereographic", "orthographic")
+
+
+def _theta_from_r(r, model):
+    """Convert normalized radius to angle theta based on projection model."""
+    if model == "equidistant":
+        return r
+    elif model == "equisolid":
+        return 2.0 * np.arcsin(np.clip(r / 2.0, -1.0 + 1e-7, 1.0 - 1e-7))
+    elif model == "orthographic":
+        return np.arcsin(np.clip(r, -1.0 + 1e-7, 1.0 - 1e-7))
+    elif model == "stereographic":
+        return 2.0 * np.arctan(r / 2.0)
+    else:
+        raise ValueError(f"Unknown fisheye model: {model}")
+
+
+def _r_from_theta(theta, model):
+    """Convert angle theta to normalized radius based on projection model."""
+    if model == "equidistant":
+        return theta
+    elif model == "equisolid":
+        return 2.0 * np.sin(theta / 2.0)
+    elif model == "orthographic":
+        return np.sin(theta)
+    elif model == "stereographic":
+        return 2.0 * np.tan(theta / 2.0)
+    else:
+        raise ValueError(f"Unknown fisheye model: {model}")
+
+
+def _max_r_for_model(theta_max, model):
+    """Get the maximum normalized radius for a given theta_max and model."""
+    return _r_from_theta(theta_max, model)
+
 
 def intrinsics_from_fov(w, h, fov_deg):
     cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
@@ -9,19 +45,42 @@ def intrinsics_from_fov(w, h, fov_deg):
 
 
 def fisheye_intrinsics_equdist(w, h, fov_fisheye_deg):
+    """Legacy function for backwards compatibility."""
+    return fisheye_intrinsics(w, h, fov_fisheye_deg, model="equidistant")
+
+
+def fisheye_intrinsics(w, h, fov_fisheye_deg, model="equidistant"):
+    """
+    Compute fisheye camera intrinsics for a given image size and FOV.
+    
+    Returns fx, fy, cx, cy, theta_max where the focal length is computed
+    such that the maximum angle maps to the image radius.
+    """
     cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
     radius = min(cx, cy)
     theta_max = np.deg2rad(fov_fisheye_deg / 2.0)
-    f = radius / theta_max
+    # For the given model, find f such that r_max * f = radius
+    r_max = _max_r_for_model(theta_max, model)
+    f = radius / r_max if r_max > 1e-9 else radius
     return f, f, cx, cy, theta_max
 
 
 def fisheye_unproject_equdist(u, v, fx, fy, cx, cy):
+    """Legacy function for backwards compatibility."""
+    return fisheye_unproject(u, v, fx, fy, cx, cy, model="equidistant")
+
+
+def fisheye_unproject(u, v, fx, fy, cx, cy, model="equidistant"):
+    """
+    Unproject fisheye pixel coordinates to 3D ray directions.
+    
+    Supports models: equidistant, equisolid, stereographic, orthographic.
+    """
     x = (u - cx) / fx
     y = (v - cy) / fy
     r = np.sqrt(x * x + y * y)
     phi = np.arctan2(y, x)
-    theta = r
+    theta = _theta_from_r(r, model)
     sin_t = np.sin(theta)
     cos_t = np.cos(theta)
     dx = sin_t * np.cos(phi)
@@ -46,24 +105,59 @@ def warp_pinhole_to_fisheye(
     fov_fisheye_deg=180.0,
     fov_src_deg=90.0,
     border_value=(0, 0, 0),
+    fisheye_model="equidistant",
+    interpolation=cv2.INTER_LANCZOS4,
 ):
+    """
+    Warp a pinhole camera image to a fisheye projection.
+    
+    Args:
+        img_bgr: Input BGR image from a pinhole camera.
+        out_size: Output image size (height, width).
+        fov_fisheye_deg: Field of view of the output fisheye image in degrees.
+        fov_src_deg: Field of view of the source pinhole image in degrees.
+        border_value: Value to use for pixels outside the source image.
+        fisheye_model: Fisheye projection model. One of:
+            - "equidistant": r = f * theta (linear angle-to-radius)
+            - "equisolid": r = 2f * sin(theta/2) (preserves relative areas)
+            - "stereographic": r = 2f * tan(theta/2) (preserves angles)
+            - "orthographic": r = f * sin(theta) (max compression at edges)
+        interpolation: OpenCV interpolation method. Options:
+            - cv2.INTER_LANCZOS4: Highest quality (default)
+            - cv2.INTER_CUBIC: High quality, faster
+            - cv2.INTER_LINEAR: Fast, lower quality
+    
+    Returns:
+        Warped fisheye image.
+    """
+    if fisheye_model not in FISHEYE_MODELS:
+        raise ValueError(f"Unknown fisheye model: {fisheye_model}. Must be one of {FISHEYE_MODELS}")
+    
     h_s, w_s = img_bgr.shape[:2]
     h_o, w_o = out_size
 
-    cx_o, cy_o = (w_o - 1) / 2.0, (h_o - 1) / 2.0
-    radius = min(cx_o, cy_o)
-    theta_max = np.deg2rad(fov_fisheye_deg / 2.0)
-    f_fish = radius / theta_max
-    fx_o = fy_o = f_fish
+    # Compute fisheye intrinsics for the output image
+    fx_o, fy_o, cx_o, cy_o, theta_max = fisheye_intrinsics(w_o, h_o, fov_fisheye_deg, model=fisheye_model)
 
+    # Compute pinhole intrinsics for the source image
     cx_s, cy_s = (w_s - 1) / 2.0, (h_s - 1) / 2.0
     f_src = (w_s / 2.0) / np.tan(np.deg2rad(fov_src_deg / 2.0))
     fx_s = fy_s = f_src
 
+    # Create output pixel grid
     uo, vo = np.meshgrid(np.arange(w_o, dtype=np.float32), np.arange(h_o, dtype=np.float32))
-    dx, dy, dz = fisheye_unproject_equdist(uo, vo, fx_o, fy_o, cx_o, cy_o)
-    r_norm = np.sqrt(((uo - cx_o) / fx_o) ** 2 + ((vo - cy_o) / fy_o) ** 2)
-    valid = r_norm <= theta_max + 1e-6
+    
+    # Unproject fisheye pixels to rays
+    dx, dy, dz = fisheye_unproject(uo, vo, fx_o, fy_o, cx_o, cy_o, model=fisheye_model)
+    
+    # Compute validity mask (within FOV)
+    x_norm = (uo - cx_o) / fx_o
+    y_norm = (vo - cy_o) / fy_o
+    r_norm = np.sqrt(x_norm * x_norm + y_norm * y_norm)
+    r_max = _max_r_for_model(theta_max, fisheye_model)
+    valid = r_norm <= r_max + 1e-6
+    
+    # Project rays to pinhole source coordinates
     us, vs = pinhole_project(dx, dy, dz, fx_s, fy_s, cx_s, cy_s)
     us[~valid] = -1
     vs[~valid] = -1
@@ -72,7 +166,7 @@ def warp_pinhole_to_fisheye(
         img_bgr,
         us.astype(np.float32),
         vs.astype(np.float32),
-        interpolation=cv2.INTER_LINEAR,
+        interpolation=interpolation,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=border_value,
     )
@@ -98,19 +192,37 @@ def warp_bbox_xyxy_pinhole_to_fisheye(
     samples_per_edge=9,
     clip=True,
     min_box_size=2.0,
+    fisheye_model="equidistant",
 ):
+    """
+    Warp a bounding box from pinhole to fisheye coordinates.
+    
+    Args:
+        bbox_xyxy: Bounding box in (x1, y1, x2, y2) format.
+        src_size: Source image size (height, width).
+        dst_size: Destination fisheye image size (height, width).
+        fov_src_deg: Source pinhole FOV in degrees.
+        fov_fisheye_deg: Destination fisheye FOV in degrees.
+        samples_per_edge: Number of samples per bbox edge for warping.
+        clip: Whether to clip the result to image bounds.
+        min_box_size: Minimum box size to return (otherwise None).
+        fisheye_model: Fisheye projection model.
+    
+    Returns:
+        Warped bounding box (x1, y1, x2, y2) or None if invalid.
+    """
     h_s, w_s = src_size
     h_d, w_d = dst_size
     x1, y1, x2, y2 = bbox_xyxy
 
     fx_s, fy_s, cx_s, cy_s = intrinsics_from_fov(w_s, h_s, fov_src_deg)
-    fx_f, fy_f, cx_f, cy_f, theta_max = fisheye_intrinsics_equdist(w_d, h_d, fov_fisheye_deg)
+    fx_f, fy_f, cx_f, cy_f, theta_max = fisheye_intrinsics(w_d, h_d, fov_fisheye_deg, model=fisheye_model)
 
     pts = sample_bbox_boundary_points_xyxy(x1, y1, x2, y2, samples_per_edge=samples_per_edge)
     u = pts[:, 0]
     v = pts[:, 1]
     d = pinhole_pixel_to_ray(u, v, fx_s, fy_s, cx_s, cy_s)
-    uf, vf, valid = ray_to_fisheye_equdist(d, fx_f, fy_f, cx_f, cy_f, theta_max=theta_max)
+    uf, vf, valid = ray_to_fisheye(d, fx_f, fy_f, cx_f, cy_f, theta_max=theta_max, model=fisheye_model)
 
     if valid.sum() < 4:
         return None
@@ -142,11 +254,30 @@ def pinhole_pixel_to_ray(u, v, fx, fy, cx, cy):
 
 
 def ray_to_fisheye_equdist(d, fx, fy, cx, cy, theta_max=None):
+    """Legacy function for backwards compatibility."""
+    return ray_to_fisheye(d, fx, fy, cx, cy, theta_max=theta_max, model="equidistant")
+
+
+def ray_to_fisheye(d, fx, fy, cx, cy, theta_max=None, model="equidistant"):
+    """
+    Project 3D ray directions to fisheye pixel coordinates.
+    
+    Args:
+        d: Ray directions (..., 3)
+        fx, fy, cx, cy: Fisheye intrinsics
+        theta_max: Maximum angle (for validity check)
+        model: Fisheye projection model
+    
+    Returns:
+        u, v: Pixel coordinates
+        valid: Boolean mask for valid projections
+    """
     dx, dy, dz = d[..., 0], d[..., 1], d[..., 2]
     dz = np.clip(dz, -1.0, 1.0)
     theta = np.arccos(dz)
     phi = np.arctan2(dy, dx)
-    r = fx * theta
+    r_norm = _r_from_theta(theta, model)
+    r = fx * r_norm  # Scale by focal length
     u = cx + r * np.cos(phi)
     v = cy + r * np.sin(phi)
     valid = np.ones_like(u, dtype=bool)

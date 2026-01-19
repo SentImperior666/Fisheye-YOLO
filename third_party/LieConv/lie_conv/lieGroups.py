@@ -4,8 +4,8 @@ import numpy as np
 from lie_conv.utils import export, Named
 
 @export
-def norm(x,dim):
-    return (x**2).sum(dim=dim).sqrt()
+def norm(x, dim, keepdim=False, eps=1e-8):
+    return torch.sqrt(torch.clamp((x**2).sum(dim=dim, keepdim=keepdim), min=eps))
 
 class LieGroup(object):
     """ The abstract Lie Group requiring additional implementation of exp,log, and lifted_elems
@@ -644,15 +644,36 @@ class FisheyeSO3(LieGroup):
 
         d_rep = d.unsqueeze(-2).expand(*bs, n, nsamples, 3)
         w = torch.cross(zhat, d_rep, dim=-1)
-        sin = norm(w, dim=-1)
+        w_norm = norm(w, dim=-1, keepdim=True)
+        sin = w_norm.squeeze(-1)
         cos = (zhat * d_rep).sum(dim=-1)
 
         angle = torch.atan2(sin, cos).unsqueeze(-1)
-        Rp = self.exp(w * sinc_inv(angle))
+
+        # Handle antipodal case: when d ≈ -zhat, pick arbitrary perpendicular axis
+        # This happens when angle ≈ π and w ≈ 0
+        antipodal_mask = (w_norm < 1e-6) & (cos.unsqueeze(-1) < 0)
+        # Use x-axis as fallback rotation axis for antipodal points
+        w_safe = torch.where(
+            antipodal_mask,
+            torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype).expand_as(w),
+            w / w_norm.clamp(min=1e-8) * angle
+        )
+        # For non-antipodal, scale by sinc_inv as before
+        w_scaled = torch.where(
+            antipodal_mask,
+            w_safe * math.pi,  # angle is π for antipodal
+            w * sinc_inv(angle)
+        )
+        Rp = self.exp(w_scaled)
 
         A = self.log(Rp @ Rz)
         flat_a = A.reshape(*bs, n * nsamples, 3)
         return flat_a, None
+
+    def distance(self, abq_pairs):
+        """Distance in SO(3) Lie algebra. With q_dim=0, only group distance matters."""
+        return norm(abq_pairs[..., :self.lie_dim], dim=-1)
 
     @torch.no_grad()
     def warp_pixels(self, uv, R):
