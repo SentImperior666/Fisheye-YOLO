@@ -179,7 +179,11 @@ class LieConv(PointConv):
         # Determine ids (and mask) for points sampled within neighborhood (A4)
         if self.knn: # NBHD: KNN
             nbhd_idx = torch.topk(dists,k,dim=-1,largest=False,sorted=False)[1] #(bs,m,nbhd)
-            valid_within_ball = (nbhd_idx>-1)&mask[:,None,:]&mask_at_query[:,:,None]
+            # Fix: gather mask at neighbor indices instead of broadcasting
+            # Original code had shape mismatch: (bs,m,k) vs (bs,1,n) when k != n
+            B_idx = torch.arange(inp_vals.shape[0],device=inp_vals.device).long()[:,None,None].expand_as(nbhd_idx)
+            nbhd_mask_gathered = mask[B_idx, nbhd_idx]  # (bs, m, k)
+            valid_within_ball = (nbhd_idx>-1)&nbhd_mask_gathered&mask_at_query[:,:,None]
             assert not torch.any(nbhd_idx>dists.shape[-1]), f"error with topk,\
                         nbhd{k} nans|inf{torch.any(torch.isnan(dists)|torch.isinf(dists))}"
         else: # NBHD: Sampled Distance Ball

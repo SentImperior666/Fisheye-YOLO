@@ -1,4 +1,4 @@
-path: /data/fisheye_coco
+path: data/fisheye_coco
 train: images/train2017
 val: images/val2017
 test: images/test2017

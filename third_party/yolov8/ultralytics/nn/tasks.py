@@ -98,6 +98,14 @@ from ultralytics.utils.torch_utils import (
     time_sync,
 )
 
+# Fisheye-YOLO: Import FisheyeConv for fisheye-equivariant models
+try:
+    from fisheye_yolo.layers import FisheyeConv
+    FISHEYE_AVAILABLE = True
+except ImportError:
+    FisheyeConv = None
+    FISHEYE_AVAILABLE = False
+
 
 class BaseModel(torch.nn.Module):
     """Base class for all YOLO models in the Ultralytics family.
@@ -1546,8 +1554,8 @@ def parse_model(d, ch, verbose=True):
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
     ch = [ch]
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
-    base_modules = frozenset(
-        {
+    # Fisheye-YOLO: Include FisheyeConv in base_modules if available
+    _base_modules_list = [
             Classify,
             Conv,
             ConvTranspose,
@@ -1582,8 +1590,10 @@ def parse_model(d, ch, verbose=True):
             SCDown,
             C2fCIB,
             A2C2f,
-        }
-    )
+    ]
+    if FISHEYE_AVAILABLE and FisheyeConv is not None:
+        _base_modules_list.append(FisheyeConv)
+    base_modules = frozenset(_base_modules_list)
     repeat_modules = frozenset(  # modules with 'repeat' arguments
         {
             BottleneckCSP,

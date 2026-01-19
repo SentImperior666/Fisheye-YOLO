@@ -58,6 +58,17 @@ def main():
         action="store_true",
         help="Preview mode: convert only first 10 images",
     )
+    parser.add_argument(
+        "--full-frame",
+        action="store_true",
+        help="Full-frame fisheye mode: fill entire rectangle (no circular mask)",
+    )
+    parser.add_argument(
+        "--sharpen",
+        type=float,
+        default=0.0,
+        help="Sharpening strength (0=none, 0.5=moderate, 1.0=strong)",
+    )
     args = parser.parse_args()
 
     # Preview mode overrides max_images
@@ -118,6 +129,8 @@ def main():
             fov_fisheye_deg=args.fov_fisheye,
             fov_src_deg=args.fov_src,
             fisheye_model=args.fisheye_model,
+            full_frame=args.full_frame,
+            sharpen=args.sharpen,
         )
         cv2.imwrite(str(out_images / info["file_name"]), warped)
 

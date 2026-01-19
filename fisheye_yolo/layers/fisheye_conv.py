@@ -73,9 +73,9 @@ class FisheyeLieConv2d(LieConv):
     """
     Fisheye-equivariant convolution layer using LieConv with SO(3) group.
     
-    Supports three processing modes:
+    Supports multiple processing modes:
     - "patch": Process image in overlapping patches (default, memory efficient)
-    - "sparse": Use sparse local neighborhoods (most memory efficient for large images)
+    - "sparse": Use sparse local neighborhoods (experimental)
     - "full": Original full pairwise computation (only for tiny images)
     """
     
@@ -90,10 +90,9 @@ class FisheyeLieConv2d(LieConv):
         mc_samples: int = 32,
         fill: float = 1 / 4,
         knn: bool = True,
-        # New scalability parameters
         mode: Literal["patch", "sparse", "full"] = "patch",
-        patch_size: int = 16,
-        patch_overlap: float = 0.5,
+        patch_size: int = 32,
+        patch_overlap: float = 0.0,
         neighborhood_radius: int = 5,
     ):
         if group is None:
@@ -128,6 +127,19 @@ class FisheyeLieConv2d(LieConv):
         self._cached_neighbor_idx = None
         self._cached_grid_size = None
 
+    def _forward_init(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Simple forward for model initialization only.
+        
+        Ultralytics runs a test forward pass with tiny dummy inputs (e.g., 64x64)
+        to compute layer strides. We use a simple conv for this since LieConv
+        is expensive and unnecessary for stride computation.
+        """
+        bs, c, h, w = x.shape
+        if not hasattr(self, '_init_conv') or self._init_conv is None:
+            self._init_conv = nn.Conv2d(c, self.c_out, kernel_size=3, padding=1, bias=False).to(x.device).to(x.dtype)
+        return self._init_conv(x)
+
     def _forward_full(self, x: torch.Tensor) -> torch.Tensor:
         """
         Original full pairwise computation. Only suitable for very small images.
@@ -154,57 +166,67 @@ class FisheyeLieConv2d(LieConv):
 
     def _forward_patch(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Process image in overlapping patches, then merge with averaging.
-        Memory efficient: O(patch_size^2 * liftsamples)^2 per patch.
+        Process image in overlapping patches with mini-batching.
+        
+        Processes patches in small groups (patch_batch_size) to balance
+        GPU utilization with memory constraints.
         """
         bs, c, h, w = x.shape
-        P = self.patch_size
-        S = max(1, int(P * (1 - self.patch_overlap)))  # stride
         
-        # Pad image if needed to fit patches
-        pad_h = (P - h % P) % P if h % S != 0 else 0
-        pad_w = (P - w % P) % P if w % S != 0 else 0
+        # Adjust patch size if feature map is smaller than configured patch_size
+        # This happens in deeper layers where spatial resolution is reduced
+        P = min(self.patch_size, h, w)
+        
+        # If feature map is small enough, process directly without patching
+        if h <= P and w <= P:
+            return self._forward_full(x)
+        
+        S = P  # Non-overlapping for speed
+        
+        # Pad image if needed to fit patches evenly
+        pad_h = (P - h % P) % P
+        pad_w = (P - w % P) % P
         if pad_h > 0 or pad_w > 0:
-            x = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
+            # Use 'constant' padding if reflect would fail (pad >= dim)
+            pad_mode = 'reflect' if (pad_h < h and pad_w < w) else 'constant'
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode=pad_mode)
         
         h_padded, w_padded = x.shape[2], x.shape[3]
+        n_patches_h = h_padded // P
+        n_patches_w = w_padded // P
         
-        # Extract patches using unfold: (bs, c, h, w) -> (bs, c*P*P, num_patches)
-        patches = F.unfold(x, kernel_size=P, stride=S)
-        num_patches = patches.shape[-1]
+        # Initialize output
+        output = torch.zeros(bs, self.c_out, h_padded, w_padded, device=x.device, dtype=x.dtype)
         
-        # Calculate grid dimensions for patches
-        nh = (h_padded - P) // S + 1
-        nw = (w_padded - P) // S + 1
+        # Process patches in small batches (4 at a time for memory efficiency)
+        patch_batch_size = 4
         
-        # Reshape for batch processing: (bs, c*P*P, num_patches) -> (bs*num_patches, c, P, P)
-        patches = patches.transpose(1, 2).reshape(bs * num_patches, c, P, P)
+        patch_coords = [(i, j) for i in range(n_patches_h) for j in range(n_patches_w)]
         
-        # Process each patch through full LieConv (now with small n = P*P)
-        out_patches = self._forward_full(patches)  # (bs*num_patches, c_out, P, P)
-        
-        # Reshape for folding: (bs*num_patches, c_out, P, P) -> (bs, c_out*P*P, num_patches)
-        c_out = out_patches.shape[1]
-        out_patches = out_patches.reshape(bs, num_patches, c_out * P * P).transpose(1, 2)
-        
-        # Fold back with overlap averaging
-        output = F.fold(
-            out_patches,
-            output_size=(h_padded, w_padded),
-            kernel_size=P,
-            stride=S
-        )
-        
-        # Count contributions for averaging
-        ones = torch.ones_like(out_patches)
-        counts = F.fold(
-            ones,
-            output_size=(h_padded, w_padded),
-            kernel_size=P,
-            stride=S
-        )
-        counts = counts.clamp(min=1)
-        output = output / counts
+        for batch_start in range(0, len(patch_coords), patch_batch_size):
+            batch_end = min(batch_start + patch_batch_size, len(patch_coords))
+            batch_coords = patch_coords[batch_start:batch_end]
+            
+            # Collect patches for this mini-batch
+            patches_list = []
+            for (i, j) in batch_coords:
+                y_start, x_start = i * P, j * P
+                patch = x[:, :, y_start:y_start+P, x_start:x_start+P]  # (bs, c, P, P)
+                patches_list.append(patch)
+            
+            # Stack into (num_patches_in_batch, bs, c, P, P) then reshape
+            patches_stack = torch.stack(patches_list, dim=0)  # (npb, bs, c, P, P)
+            npb = patches_stack.shape[0]
+            patches_batch = patches_stack.reshape(npb * bs, c, P, P)  # (npb*bs, c, P, P)
+            
+            # Process through LieConv
+            out_batch = self._forward_full(patches_batch)  # (npb*bs, c_out, P, P)
+            out_batch = out_batch.reshape(npb, bs, self.c_out, P, P)  # (npb, bs, c_out, P, P)
+            
+            # Place outputs back
+            for idx, (i, j) in enumerate(batch_coords):
+                y_start, x_start = i * P, j * P
+                output[:, :, y_start:y_start+P, x_start:x_start+P] = out_batch[idx]
         
         # Remove padding
         if pad_h > 0 or pad_w > 0:
@@ -319,19 +341,32 @@ class FisheyeLieConv2d(LieConv):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass with automatic mode selection.
+        Forward pass using LieConv for fisheye-equivariant convolution.
         
         Args:
             x: Input tensor of shape (bs, c, h, w)
             
         Returns:
             Output tensor of shape (bs, c_out, h, w)
+        
+        Modes:
+            - "patch": Process in patches (default, memory efficient)
+            - "sparse": Sparse neighborhoods (experimental)
+            - "full": Full pairwise LieConv (small images only)
         """
         # Apply stride via pooling first
         if self.stride > 1:
             x = F.avg_pool2d(x, kernel_size=self.stride, stride=self.stride)
         
-        # Dispatch to appropriate implementation
+        bs, c, h, w = x.shape
+        
+        # Use simple conv for model initialization only (stride computation)
+        # Ultralytics uses bs=1, not training, with small dummy images
+        is_init_pass = (bs == 1 and not self.training and h <= 64 and w <= 64)
+        if is_init_pass:
+            return self._forward_init(x)
+        
+        # Dispatch to LieConv implementation
         if self.mode == "patch":
             return self._forward_patch(x)
         elif self.mode == "sparse":
@@ -346,6 +381,9 @@ class FisheyeConv(nn.Module):
     """
     Fisheye-equivariant convolution block matching YOLO Conv interface.
     Includes BatchNorm and activation.
+    
+    When camera is not provided, uses the global camera from
+    fisheye_yolo.utils.global_camera.get_global_fisheye_camera().
     """
     
     def __init__(
@@ -360,19 +398,57 @@ class FisheyeConv(nn.Module):
         act: bool = True,
         camera: Optional[FisheyeCameraModel] = None,
         group: Optional[FisheyeSO3] = None,
-        liftsamples: int = 4,
-        mc_samples: int = 32,
-        fill: float = 1 / 4,
-        knn: bool = True,
+        liftsamples: Optional[int] = None,
+        mc_samples: Optional[int] = None,
+        fill: Optional[float] = None,
+        knn: Optional[bool] = None,
         # Scalability parameters
-        mode: Literal["patch", "sparse", "full"] = "patch",
-        patch_size: int = 16,
-        patch_overlap: float = 0.5,
-        neighborhood_radius: int = 5,
+        mode: Optional[Literal["patch", "sparse", "full"]] = None,
+        patch_size: Optional[int] = None,
+        patch_overlap: Optional[float] = None,
+        neighborhood_radius: Optional[int] = None,
     ):
         super().__init__()
         # These params are not used in LieConv but kept for YOLO compatibility
         del k, p, g, d
+        
+        # If no camera provided, use global camera
+        if camera is None and group is None:
+            from fisheye_yolo.utils.global_camera import get_global_fisheye_camera, get_global_fisheye_config
+            camera = get_global_fisheye_camera()
+            if camera is None:
+                raise ValueError(
+                    "No camera provided and no global camera set. "
+                    "Call fisheye_yolo.utils.global_camera.set_global_fisheye_camera() first."
+                )
+            # Use global config for unset parameters
+            cfg = get_global_fisheye_config()
+            if liftsamples is None:
+                liftsamples = cfg["liftsamples"]
+            if mc_samples is None:
+                mc_samples = cfg["mc_samples"]
+            if fill is None:
+                fill = cfg["fill"]
+            if knn is None:
+                knn = cfg["knn"]
+            if mode is None:
+                mode = cfg["mode"]
+            if patch_size is None:
+                patch_size = cfg["patch_size"]
+            if patch_overlap is None:
+                patch_overlap = cfg["patch_overlap"]
+            if neighborhood_radius is None:
+                neighborhood_radius = cfg["neighborhood_radius"]
+        else:
+            # Use defaults if not specified
+            liftsamples = liftsamples if liftsamples is not None else 4
+            mc_samples = mc_samples if mc_samples is not None else 32
+            fill = fill if fill is not None else 0.25
+            knn = knn if knn is not None else True
+            mode = mode if mode is not None else "patch"
+            patch_size = patch_size if patch_size is not None else 16
+            patch_overlap = patch_overlap if patch_overlap is not None else 0.5
+            neighborhood_radius = neighborhood_radius if neighborhood_radius is not None else 5
         
         self.conv = FisheyeLieConv2d(
             c1,

@@ -107,6 +107,8 @@ def warp_pinhole_to_fisheye(
     border_value=(0, 0, 0),
     fisheye_model="equidistant",
     interpolation=cv2.INTER_LANCZOS4,
+    full_frame=False,
+    sharpen=0.0,
 ):
     """
     Warp a pinhole camera image to a fisheye projection.
@@ -126,6 +128,11 @@ def warp_pinhole_to_fisheye(
             - cv2.INTER_LANCZOS4: Highest quality (default)
             - cv2.INTER_CUBIC: High quality, faster
             - cv2.INTER_LINEAR: Fast, lower quality
+        full_frame: If True, fill the entire rectangular output (no circular mask).
+            This produces images similar to real full-frame fisheye cameras.
+            If False (default), creates circular fisheye with black borders.
+        sharpen: Sharpening strength (0.0 = none, 0.5 = moderate, 1.0 = strong).
+            Helps counteract blur from stretching in full-frame mode.
     
     Returns:
         Warped fisheye image.
@@ -136,8 +143,21 @@ def warp_pinhole_to_fisheye(
     h_s, w_s = img_bgr.shape[:2]
     h_o, w_o = out_size
 
-    # Compute fisheye intrinsics for the output image
-    fx_o, fy_o, cx_o, cy_o, theta_max = fisheye_intrinsics(w_o, h_o, fov_fisheye_deg, model=fisheye_model)
+    cx_o, cy_o = (w_o - 1) / 2.0, (h_o - 1) / 2.0
+    theta_max = np.deg2rad(fov_fisheye_deg / 2.0)
+
+    if full_frame:
+        # Full-frame mode: fisheye fills entire rectangle
+        # Compute focal length so that the image corners correspond to theta_max
+        # Distance from center to corner in pixels
+        corner_dist = np.sqrt(cx_o**2 + cy_o**2)
+        r_max = _max_r_for_model(theta_max, fisheye_model)
+        fx_o = fy_o = corner_dist / r_max if r_max > 1e-9 else corner_dist
+    else:
+        # Circular mode: fisheye inscribed in rectangle
+        radius = min(cx_o, cy_o)
+        r_max = _max_r_for_model(theta_max, fisheye_model)
+        fx_o = fy_o = radius / r_max if r_max > 1e-9 else radius
 
     # Compute pinhole intrinsics for the source image
     cx_s, cy_s = (w_s - 1) / 2.0, (h_s - 1) / 2.0
@@ -150,17 +170,18 @@ def warp_pinhole_to_fisheye(
     # Unproject fisheye pixels to rays
     dx, dy, dz = fisheye_unproject(uo, vo, fx_o, fy_o, cx_o, cy_o, model=fisheye_model)
     
-    # Compute validity mask (within FOV)
-    x_norm = (uo - cx_o) / fx_o
-    y_norm = (vo - cy_o) / fy_o
-    r_norm = np.sqrt(x_norm * x_norm + y_norm * y_norm)
-    r_max = _max_r_for_model(theta_max, fisheye_model)
-    valid = r_norm <= r_max + 1e-6
-    
     # Project rays to pinhole source coordinates
     us, vs = pinhole_project(dx, dy, dz, fx_s, fy_s, cx_s, cy_s)
-    us[~valid] = -1
-    vs[~valid] = -1
+
+    if not full_frame:
+        # Compute validity mask (within FOV) - only for circular mode
+        x_norm = (uo - cx_o) / fx_o
+        y_norm = (vo - cy_o) / fy_o
+        r_norm = np.sqrt(x_norm * x_norm + y_norm * y_norm)
+        r_max = _max_r_for_model(theta_max, fisheye_model)
+        valid = r_norm <= r_max + 1e-6
+        us[~valid] = -1
+        vs[~valid] = -1
 
     out = cv2.remap(
         img_bgr,
@@ -170,6 +191,13 @@ def warp_pinhole_to_fisheye(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=border_value,
     )
+    
+    # Apply sharpening if requested
+    if sharpen > 0:
+        # Unsharp mask: out + sharpen * (out - blur)
+        blur = cv2.GaussianBlur(out, (0, 0), sigmaX=1.5)
+        out = cv2.addWeighted(out, 1.0 + sharpen, blur, -sharpen, 0)
+    
     return out
 
 

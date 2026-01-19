@@ -7,13 +7,19 @@ services:
       dockerfile: docker/Dockerfile
     image: fisheye-yolo:latest
     working_dir: /workspace
+    runtime: nvidia
+    shm_size: '8gb'
     volumes:
       - ..:/workspace
-      - /data:/data
     environment:
       - PYTHONPATH=/workspace
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: ["gpu"]
+      - NVIDIA_VISIBLE_DEVICES=all
+
+  tensorboard:
+    image: fisheye-yolo:latest
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace
+    ports:
+      - "6006:6006"
+    command: tensorboard --logdir /workspace/runs --reload_interval 30 --host 0.0.0.0 --port 6006
